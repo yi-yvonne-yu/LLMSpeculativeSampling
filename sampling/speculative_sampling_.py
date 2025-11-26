@@ -6,10 +6,32 @@ from sampling.kvcache_model import KVCacheModel
 from sampling.utils import norm_logits, sample, max_fn
 from globals import Decoder
 
+def _is_medusa_model(model: torch.nn.Module) -> bool:
+    return hasattr(model, "medusa_head")
+
+def _get_model_device(model: torch.nn.Module, fallback: torch.device) -> torch.device:
+    if hasattr(model, "device"):
+        return model.device
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return fallback
+
+def _approx_logits(model: torch.nn.Module, x: torch.Tensor, use_medusa_head: bool, medusa_head_index: int = 0):
+    if use_medusa_head:
+        medusa_logits, _, _ = model(
+            x,
+            output_orig=True,
+            medusa_forward=True,
+        )
+        return medusa_logits[medusa_head_index]
+    return model(x).logits
+
 @torch.no_grad()
 def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          max_len : int , gamma : int = 4,
-                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None) -> torch.Tensor:
+                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
+                         use_medusa_head_for_approx : bool = False, medusa_head_index : int = 0) -> torch.Tensor:
     """
     Google version Speculative Sampling.
     https://arxiv.org/pdf/2211.17192.pdf
@@ -34,11 +56,21 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     
     assert prefix.shape[0] == 1, "input batch size must be 1"
 
-    assert approx_model.device == target_model.device
+    approx_device = _get_model_device(approx_model, prefix.device)
+    target_device = _get_model_device(target_model, prefix.device)
+    assert approx_device == target_device
     
-    device = target_model.device
+    device = target_device
     
-    approx_model_cache = KVCacheModel(approx_model, temperature, top_k, top_p)
+    approx_use_medusa_head = use_medusa_head_for_approx or _is_medusa_model(approx_model)
+    approx_model_cache = KVCacheModel(
+        approx_model,
+        temperature,
+        top_k,
+        top_p,
+        use_medusa_head=approx_use_medusa_head,
+        medusa_head_index=medusa_head_index,
+    )
     target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
     
     resample_count = 0
@@ -100,13 +132,14 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
 
     if verbose:
         print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, target_sample_count {target_sample_count}, resample_count {resample_count}")
-    return prefix
+    return prefix, prefix.shape[-1] - seq_len
 
 
 @torch.no_grad()
 def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          max_len : int , gamma : int = 4,
-                         temperature : float = 1, top_k : int = 0, top_p : float = 0, random_seed : int = None) -> torch.Tensor:
+                         temperature : float = 1, top_k : int = 0, top_p : float = 0, random_seed : int = None,
+                         use_medusa_head_for_approx : bool = False, medusa_head_index : int = 0) -> torch.Tensor:
     """
     DeepMind version Speculative Sampling.
     Accelerating Large Language Model Decoding with Speculative Sampling
@@ -131,6 +164,8 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
     
     assert prefix.shape[0] == 1, "input batch size must be 1"
 
+    approx_use_medusa_head = use_medusa_head_for_approx or _is_medusa_model(approx_model)
+
     with tqdm(total=T, desc="speculative sampling") as pbar:
         while prefix.shape[1] < T:
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
@@ -138,12 +173,13 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
             prefix_len = prefix.shape[1]
             for _ in range(gamma):
                 # p.logits shape (batch, seq, vocab)
-                q = approx_model(x).logits
+                q = _approx_logits(approx_model, x, approx_use_medusa_head, medusa_head_index)
                 next_tok = sample(norm_logits(q[:, -1, :], 
                                   temperature, top_k, top_p))
                 x = torch.cat((x, next_tok), dim=1)
             
             # normalize the logits
+            q = _approx_logits(approx_model, x, approx_use_medusa_head, medusa_head_index)
             for i in range(q.shape[1]):
                 q[:,i,:] = norm_logits(q[:,i,:],
                                 temperature, top_k, top_p)
@@ -181,4 +217,4 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
             prefix = torch.cat((prefix, t), dim=1)
             pbar.update(n - pbar.n)
 
-    return prefix
+    return prefix, prefix.shape[-1] - seq_len

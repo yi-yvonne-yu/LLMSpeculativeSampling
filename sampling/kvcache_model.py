@@ -114,4 +114,3 @@ class KVCacheModel():
         
         self._past_key_values = past_key_values_trimmed
         self._prob_history = self._prob_history[:, :end_pos, :]
-

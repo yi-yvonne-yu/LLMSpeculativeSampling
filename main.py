@@ -7,17 +7,17 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from sampling import autoregressive_sampling, speculative_sampling, speculative_sampling_v2
 from globals import Decoder
+
 import time
-
-
 
 # my local models
 MODELZOO = {
-    # llama-1
     # https://huggingface.co/PY007/TinyLlama-1.1B-step-50K-105b
     "llama2-7b" : "meta-llama/Llama-2-7b-hf",
     "llama2-13b" : "meta-llama/Llama-2-13b-hf",
     "llama2-70b" : "meta-llama/Llama-2-70b-hf",
+    "superbpe_3h_stage2" : "yvonne90190/superbpe_1b_3h_stage2",
+    "superbpe_5h_stage2" : "yvonne90190/superbpe_1b_5h_stage2"
 }
 
 def parse_arguments():
