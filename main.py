@@ -7,7 +7,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from sampling import autoregressive_sampling, speculative_sampling, speculative_sampling_v2
 from globals import Decoder
-
+import time
 
 
 
@@ -15,15 +15,9 @@ from globals import Decoder
 MODELZOO = {
     # llama-1
     # https://huggingface.co/PY007/TinyLlama-1.1B-step-50K-105b
-    "llama1b": "/share_nfs/fangjiarui/root/code/hf_models/TinyLlama-1.1B-step-50K-105b",
-    "llama7b": "/share_nfs/tianzhi/code/llama-7b",
-    "llama30b": "/share_nfs/fangjiarui/root/code/hf_models/llama-30b-hf",
-    "llama2-7b" : "/share_nfs/fangjiarui/root/code/hf_models/llama-2-7b-hf",
-    "llama2-70b" : "/share_nfs/fangjiarui/root/code/hf_models/llama-2-70b-hf",
-    "bloom-560m": "/share_nfs/fangjiarui/root/code/hf_models/bloom-560m",
-    "bloom7b": "/share_nfs/fangjiarui/root/code/hf_models/bloomz-7b1",
-    "baichuan-7b": "/share_nfs/duanqiyuan/models/source_models/hf/baichuan-7B",
-    "baichuan-13b": "/share_nfs/duanqiyuan/models/source_models/hf/Baichuan-13B-Base",
+    "llama2-7b" : "meta-llama/Llama-2-7b-hf",
+    "llama2-13b" : "meta-llama/Llama-2-13b-hf",
+    "llama2-70b" : "meta-llama/Llama-2-70b-hf",
 }
 
 def parse_arguments():
@@ -31,7 +25,7 @@ def parse_arguments():
 
     parser.add_argument('--input', type=str, default="Any recommendations for my holidays in Abu Dhabi?")
     parser.add_argument('--approx_model_name', type=str, default=MODELZOO["llama2-7b"])
-    parser.add_argument('--target_model_name', type=str, default=MODELZOO["llama2-70b"])
+    parser.add_argument('--target_model_name', type=str, default=MODELZOO["llama2-13b"])
     parser.add_argument('--verbose', '-v', action='store_true', default=False, help='enable verbose mode')
     parser.add_argument('--seed', '-s', type=int, default=None, help='set a random seed, which can makes the result reproducible')
     parser.add_argument('--benchmark', '-b', action='store_true', default=False, help='show benchmark results.')
@@ -95,7 +89,10 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
     top_p = 0.9
 
     torch.manual_seed(123)
-    output = autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
+    start_time = time.time()
+    output, num_tokens = autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
+    total_time = time.time() - start_time
+    print(f"num_tokens = {num_tokens}, time = {total_time}, token/sec = {num_tokens/total_time}")
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     color_print(f"large (target) model autoregressive_sampling: {generated_text}")
     
@@ -104,7 +101,10 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
                   input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
 
     torch.manual_seed(123)
-    output = autoregressive_sampling(input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
+    start_time = time.time()
+    output, num_tokens = autoregressive_sampling(input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
+    total_time = time.time() - start_time
+    print(f"num_tokens = {num_tokens}, time = {total_time}, token/sec = {num_tokens/total_time}")
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     color_print(f"small (approx) model autoregressive_sampling: {generated_text}")
     
@@ -113,12 +113,17 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
                   input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
     
     torch.manual_seed(123)
-    output = speculative_sampling_v2(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
+    output, num_tokens = speculative_sampling_v2(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
+    total_time = time.time() - start_time
+    print(f"num_tokens = {num_tokens}, time = {total_time}, token/sec = {num_tokens/total_time}")
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     color_print(f"deepmind's speculative_sampling: {generated_text}")   
 
     torch.manual_seed(123)
-    output = speculative_sampling(input_ids, small_model, large_model, num_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose)
+    start_time = time.time()
+    output, num_tokens = speculative_sampling(input_ids, small_model, large_model, num_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose)
+    total_time = time.time() - start_time
+    print(f"num_tokens = {num_tokens}, time = {total_time}, token/sec = {num_tokens/total_time}")
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     color_print(f"google's speculative_sampling: {generated_text}")
     

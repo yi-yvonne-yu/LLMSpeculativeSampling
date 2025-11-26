@@ -100,7 +100,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
 
     if verbose:
         print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, target_sample_count {target_sample_count}, resample_count {resample_count}")
-    return prefix
+    return prefix, prefix.shape[-1] - seq_len
 
 
 @torch.no_grad()
@@ -181,5 +181,5 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
             prefix = torch.cat((prefix, t), dim=1)
             pbar.update(n - pbar.n)
 
-    return prefix
+    return prefix, prefix.shape[-1] - seq_len
 

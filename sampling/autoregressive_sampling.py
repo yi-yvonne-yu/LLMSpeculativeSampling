@@ -6,6 +6,7 @@ from sampling.utils import norm_logits, sample
 @torch.no_grad()
 def autoregressive_sampling(x : torch.Tensor, model : torch.nn.Module, N : int, 
                             temperature : float = 1, top_k : int = 0, top_p : float = 0):
+    seq_len = x.shape[1]
     n = len(x)
     T = len(x) + N
 
@@ -24,5 +25,5 @@ def autoregressive_sampling(x : torch.Tensor, model : torch.nn.Module, N : int,
         idx_next = sample(last_p)
         x = torch.cat((x, idx_next), dim=1)
         n += 1
-    return x
+    return x, x.shape[-1] - seq_len
 
