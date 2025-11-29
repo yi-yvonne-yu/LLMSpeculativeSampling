@@ -8,8 +8,8 @@ from globals import Decoder
 
 @torch.no_grad()
 def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         max_len : int , gamma : int = 4,
-                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None) -> torch.Tensor:
+                         max_len : int , gamma : int,
+                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None, eos_token_id : int = None) -> dict:
     """
     Google version Speculative Sampling.
     https://arxiv.org/pdf/2211.17192.pdf
@@ -37,20 +37,28 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     assert approx_model.device == target_model.device
     
     device = target_model.device
-    
+
     approx_model_cache = KVCacheModel(approx_model, temperature, top_k, top_p)
     target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
     
     resample_count = 0
     target_sample_count = 0
     accepted_count = 0
+    num_steps = 0
     
+    is_superbpe = False
+    if hasattr(target_model, "config") and hasattr(target_model.config, "base_model_name_or_path"):
+        if "superbpe" in target_model.config._name_or_path:
+            is_superbpe = True
+            # print("is superbpe")
+
     while prefix.shape[1] < T:
+        num_steps += 1
         # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
         prefix_len = prefix.shape[1]
 
         x = approx_model_cache.generate(prefix, gamma)
-        _ = target_model_cache.generate(x, 1)
+        _ = target_model_cache.generate(x, 1, use_base_model_only=True)
         
         n = prefix_len + gamma - 1
         
@@ -61,6 +69,11 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
             r = torch.rand(1, device = device)
             j = x[:, prefix_len + i]
             
+            if is_superbpe and i > 0 and eos_token_id is not None and j == eos_token_id:
+                n = prefix_len + i - 1
+                # print("medusa head predict eos")
+                break
+
             if r > (target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j]):
                 # reject
                 n = prefix_len + i - 1
@@ -97,16 +110,50 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         
         
         prefix = torch.cat((prefix, t), dim=1)
+        
+        # Calculate and print accepted tokens
+        num_accepted = n - prefix_len + 1
+        # print(f"step {num_steps}: accepted {num_accepted} tokens")
 
+        if eos_token_id is not None:
+            # Check if EOS is in the newly added tokens (prefix[prefix_len:])
+            # It could be in the accepted draft tokens or the resampled/sampled token 't'
+            new_tokens = prefix[:, prefix_len:]
+            if (new_tokens == eos_token_id).any():
+                # print("end eos")
+                # Truncate at the first EOS occurrence
+                # Find the index of the first EOS
+                eos_idx = (new_tokens[0] == eos_token_id).nonzero(as_tuple=True)[0]
+                if len(eos_idx) > 0:
+                    first_eos = eos_idx[0].item()
+                    prefix = prefix[:, :prefix_len + first_eos + 1] # Include EOS
+                    break
+        
+        approx_model_cache.rollback(n)
+        target_model_cache.rollback(n)
+        
+        # Sync approx_model_cache from target_model_cache
+        # This avoids recomputing KV cache for accepted tokens in approx model
+        approx_model_cache.sync_from(target_model_cache)
+    
     if verbose:
         print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, target_sample_count {target_sample_count}, resample_count {resample_count}")
-    return prefix
+        
+    scores = target_model_cache._logit_history[:, seq_len-1 : prefix.shape[1] - 1, :]
+    
+    return {
+        "sequences": prefix,
+        "scores": scores,
+        "num_tokens": prefix.shape[-1] - seq_len,
+        "num_step": num_steps,
+        "generation": prefix[:, seq_len:]
+    }
 
 
 @torch.no_grad()
 def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         max_len : int , gamma : int = 4,
-                         temperature : float = 1, top_k : int = 0, top_p : float = 0, random_seed : int = None) -> torch.Tensor:
+                         max_len : int , gamma : int,
+                         temperature : float = 1, top_k : int = 0, top_p : float = 0, random_seed : int = None) -> dict:
     """
     DeepMind version Speculative Sampling.
     Accelerating Large Language Model Decoding with Speculative Sampling
@@ -131,8 +178,12 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
     
     assert prefix.shape[0] == 1, "input batch size must be 1"
 
+    scores = []
+    num_steps = 0
+
     with tqdm(total=T, desc="speculative sampling") as pbar:
         while prefix.shape[1] < T:
+            num_steps += 1
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
             x = prefix
             prefix_len = prefix.shape[1]
@@ -148,7 +199,8 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
                 q[:,i,:] = norm_logits(q[:,i,:],
                                 temperature, top_k, top_p)
             # p  = M_p[prefix + x_0, x_0, .., x_(gamma-1)]
-            p = target_model(x).logits
+            p_logits = target_model(x).logits
+            p = p_logits.clone()
             for i in range(p.shape[1]):
                 p[:,i,:] = norm_logits(p[:,i,:],
                                 temperature, top_k, top_p)
@@ -181,4 +233,17 @@ def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Modul
             prefix = torch.cat((prefix, t), dim=1)
             pbar.update(n - pbar.n)
 
-    return prefix
+            current_scores = p_logits[:, prefix_len-1 : n+1, :]
+            scores.append(current_scores)
+            
+            prefix = torch.cat((prefix, t), dim=1)
+            pbar.update(n - pbar.n)
+
+    scores = torch.cat(scores, dim=1)
+    return {
+        "sequences": prefix,
+        "scores": scores,
+        "num_tokens": prefix.shape[-1] - seq_len,
+        "num_step": num_steps,
+        "generation": prefix[:, seq_len:]
+    }

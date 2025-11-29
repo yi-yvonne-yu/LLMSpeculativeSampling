@@ -1,15 +1,19 @@
 import torch
 import torch.nn as nn
-# [MODIFIED]
-# from transformers import Olmo2ForCausalLM
+import torch.nn.functional as F
 from transformers.models.olmo2 import Olmo2ForCausalLM
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedModel, PretrainedConfig
 from transformers import AutoTokenizer, AutoConfig
 import os
 from huggingface_hub import hf_hub_download
-from transformers import AutoConfig, PreTrainedModel
-import torch
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from dataclasses import dataclass
+from typing import Optional, List, Union
+
+@dataclass
+class MedusaCausalLMOutput(CausalLMOutputWithPast):
+    medusa_logits: Optional[List[torch.Tensor]] = None
 
 class MedusaConfig(PretrainedConfig):
     """
@@ -21,9 +25,7 @@ class MedusaConfig(PretrainedConfig):
         base_model_name_or_path (str, optional): The name or path of the base model. Default is "lmsys/vicuna-7b-v1.3".
         **kwargs: Additional keyword arguments to be passed to the parent class constructor.
     """
-    # [MODIFIED]
-    model_type = "medusa"
-
+    model_type = "medusa" 
     def __init__(
         self,
         medusa_num_heads: int | None = None,
@@ -53,7 +55,7 @@ class ResBlock(nn.Module):
         # Initialize as an identity mapping
         torch.nn.init.zeros_(self.linear.weight)
         # Use SiLU activation to keep consistent with the Llama model
-        self.act = nn.SiLU() # 
+        self.act = nn.SiLU()
 
     def forward(self, x):
         """
@@ -65,10 +67,10 @@ class ResBlock(nn.Module):
         Returns:
             torch.Tensor: Output after the residual connection and activation.
         """
-        return x + self.act(self.linear(x)) 
+        return x + self.act(self.linear(x))
 
 
-class MedusaModelABC(PreTrainedModel):
+class MedusaModelABC(nn.Module):
     """The Medusa Language Model Head.
 
     This module creates a series of prediction heads (based on the 'medusa' parameter)
@@ -107,7 +109,7 @@ class MedusaModelABC(PreTrainedModel):
         self.medusa_head = nn.ModuleList(
             [
                 nn.Sequential(
-                    *([ResBlock(self.hidden_size)] * medusa_num_layers), 
+                    *([ResBlock(self.hidden_size)] * medusa_num_layers),
                     nn.Linear(self.hidden_size, self.vocab_size, bias=False),
                 )
                 for _ in range(medusa_num_heads)
@@ -117,7 +119,6 @@ class MedusaModelABC(PreTrainedModel):
     @property
     def base_model(self):
         return self
-    
     @classmethod
     def from_pretrained(
         cls,
@@ -128,12 +129,7 @@ class MedusaModelABC(PreTrainedModel):
         # Manually load config to ensure that the medusa_num_heads parameter is loaded
         kwargs.pop("config", None)
         try:
-            print("MedusaModelBC from pretrianed")
             config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
-            # print("config.medusa_num_heads = ", config.medusa_num_heads)
-            # config.medusa_num_heads = 1 # TODO
-            print("from pretrained: medusa_num_heads = ", config.medusa_num_heads)
-            
             return super().from_pretrained(
                 pretrained_model_name_or_path,
                 *args,
@@ -141,11 +137,9 @@ class MedusaModelABC(PreTrainedModel):
                 config=config,
             )
         except:
-            print("except")
             config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
             base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
             base_model_config.medusa_num_heads = config.medusa_num_heads # TODO: fix the uploaded config (only include 2 heads)
-            # base_model_config.medusa_num_heads = 5  # TODO: fix the uploaded config (only include 2 heads)
             base_model_config.medusa_num_layers = config.medusa_num_layers
             model = super().from_pretrained(
                 config.base_model_name_or_path,
@@ -160,9 +154,12 @@ class MedusaModelABC(PreTrainedModel):
                 filename = hf_hub_download(pretrained_model_name_or_path, "medusa_lm_head.pt")
             medusa_head_state_dict = torch.load(filename, map_location=model.device)
             model.medusa_head.load_state_dict(medusa_head_state_dict, strict=False)
-            print("from pretrained: medusa_num_heads = ", config.medusa_num_heads)
+            # for i in range(model.medusa):
+            #     model.medusa_head[i][-1].weight.data[:] = model.lm_head.weight.data[:]
+            #     print(f"copy lm_head to medusa head {i}")
             return model
         
+
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
 
@@ -171,58 +168,114 @@ class MedusaModelABC(PreTrainedModel):
         """
         return self.tokenizer
 
+
     def forward(
         self,
-        input_ids=None,
-        attention_mask=None,
-        past_key_values=None,
-        output_orig=False,
-        position_ids=None,
-        medusa_forward=False,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
         **kwargs,
     ):
         """Forward pass of the MedusaModel.
-
-        Args:
-            input_ids (torch.Tensor, optional): Input token IDs.
-            attention_mask (torch.Tensor, optional): Attention mask.
-            labels (torch.Tensor, optional): Ground truth labels for loss computation.
-            past_key_values (tuple, optional): Tuple containing past key and value states for attention.
-            output_orig (bool, optional): Whether to also output predictions from the original LM head.
-            position_ids (torch.Tensor, optional): Position IDs.
-
-        Returns:
-            torch.Tensor: A tensor containing predictions from all Medusa heads.
-            (Optional) Original predictions from the base model's LM head.
         """
         
-        if not medusa_forward:
-            return super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-                **kwargs,
-            )
-        with torch.inference_mode():
-            outputs = self.base_model.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-                **kwargs,
-            )
-            if output_orig:
-                orig = self.base_model.lm_head(outputs[0])
-        # Clone the output hidden states
-        hidden_states = outputs[0].clone()
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # Pass input through the base model
+        outputs = self.base_model.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
+        )
+        
+        hidden_states = outputs[0]
+        logits = self.base_model.lm_head(hidden_states)
+        
         medusa_logits = []
         for i in range(self.medusa):
             medusa_logits.append(self.medusa_head[i](hidden_states))
-        if output_orig:
-            return torch.stack(medusa_logits, dim=0), outputs, orig
-        return torch.stack(medusa_logits, dim=0)
-    
+            
+        if not return_dict:
+            return (logits,) + outputs[1:] + (medusa_logits,)
+            
+        return MedusaCausalLMOutput(
+            loss=None,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            medusa_logits=medusa_logits
+        )
+
+    def base_model_forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        """Forward pass of the base model only (no Medusa heads).
+        """
+        
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # Pass input through the base model
+        outputs = self.base_model.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
+        )
+        
+        hidden_states = outputs[0]
+        logits = self.base_model.lm_head(hidden_states)
+        
+        if not return_dict:
+            return (logits,) + outputs[1:]
+            
+        return CausalLMOutputWithPast(
+            loss=None,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
 class MedusaModelOlmo(MedusaModelABC, Olmo2ForCausalLM):
     config_class = MedusaConfig
     pass
@@ -236,27 +289,20 @@ class MedusaModel():
         *args,
         **kwargs,
     ):
-        print("from_pretrained")
+        # print("from_pretrained")
         try:
             config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
-            print("here")
-        except Exception:
-            config = None
+        
+            return MedusaModelOlmo.from_pretrained(
+                pretrained_model_name_or_path,
+                *args,
+                **kwargs,
+            )
+            
+        except:
+            # MEDUSA-v0.1 load
+            config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
+            base_model_config = AutoConfig.from_pretrained(config.base_model_name_or_path)
+            config.model_type = base_model_config.model_type
+        raise ValueError("Only support llama and olmo for now!!")
 
-        # non-medusa configs: treat as plain olmo2
-        return MedusaModelOlmo.from_pretrained(
-            pretrained_model_name_or_path,
-            *args,
-            **kwargs,
-        )
-
-def print_dynamic_cache_shapes(past_key_values):
-    """
-    Print the shape of all key/value tensors in a DynamicCache object.
-    
-    Args:
-        past_key_values (DynamicCache): Returned from model(..., use_cache=True)
-    """
-    for i, (k, v) in enumerate(zip(past_key_values.key_cache, past_key_values.value_cache)):
-        print(f"past_key_values: Layer {i} - key shape: {tuple(k.shape)}, value shape: {tuple(v.shape)}")
-        break

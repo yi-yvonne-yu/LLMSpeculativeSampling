@@ -5,13 +5,15 @@ from sampling.utils import norm_logits, sample
 
 @torch.no_grad()
 def autoregressive_sampling(x : torch.Tensor, model : torch.nn.Module, N : int, 
-                            temperature : float = 1, top_k : int = 0, top_p : float = 0):
+                            temperature : float = 1, top_k : int = 0, top_p : float = 0, eos_token_id : int = None):
     seq_len = x.shape[1]
-    n = len(x)
-    T = len(x) + N
-
+    T = seq_len + N
+    n=0
     past_key_values = None
-    while n < T:
+    scores = []
+    while x.shape[1] < T:
+        n += 1
+
         # outputs = model(x)
         if past_key_values:
             last_ids = x[:, -1]
@@ -21,9 +23,20 @@ def autoregressive_sampling(x : torch.Tensor, model : torch.nn.Module, N : int,
         else:
             outputs = model(x)
         last_p = norm_logits(outputs.logits[::, -1, :], temperature, top_k, top_p)
+        scores.append(outputs.logits[::, -1, :])
         past_key_values = outputs.past_key_values
         idx_next = sample(last_p)
         x = torch.cat((x, idx_next), dim=1)
-        n += 1
-    return x, x.shape[-1] - seq_len
+        
+        if eos_token_id is not None and idx_next[0] == eos_token_id:
+            # print("end eos")
+            break
+        
+    return {
+        "sequences": x,
+        "scores": torch.stack(scores, dim=1),
+        "num_tokens": x.shape[-1] - seq_len,
+        "num_step": n,
+        "generation": x[:, seq_len:]
+    }
 
