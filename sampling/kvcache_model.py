@@ -101,7 +101,7 @@ class KVCacheModel():
         next_tok = sample(q)
         x = torch.cat((x, next_tok), dim=1)
         
-        if medusa_logits is not None:
+        if medusa_logits is not None and not use_base_model_only:
             
             #  print("use medusa logit")
              # Medusa generation: use medusa heads to predict subsequent tokens

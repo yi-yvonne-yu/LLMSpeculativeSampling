@@ -18,9 +18,10 @@ import time
 # my local models
 MODELZOO = {
     # https://huggingface.co/PY007/TinyLlama-1.1B-step-50K-105b
-    "llama2-7b" : "meta-llama/Llama-2-7b-hf",
-    "llama2-13b" : "meta-llama/Llama-2-13b-hf",
-    "llama2-70b" : "meta-llama/Llama-2-70b-hf",
+    "llama2_1b" : "meta-llama/Llama-3.2-1B",
+    "llama2_7b" : "meta-llama/Llama-2-7b-hf",
+    "llama2_13b" : "meta-llama/Llama-2-13b-hf",
+    "llama2_70b" : "meta-llama/Llama-2-70b-hf",
     "superbpe_3h_stage2" : "yvonne90190/superbpe_1b_3h_stage2",
     "superbpe_5h_stage2" : "yvonne90190/superbpe_1b_5h_stage2",
     "medusa_1b_5h_stage2" : "yvonne90190/medusa_1b_5h_stage2",
@@ -32,8 +33,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
 
     parser.add_argument('--input', type=str, default="Any recommendations for my holidays in Abu Dhabi?")
-    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
-    parser.add_argument('--target_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
+    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["superbpe_3h_stage2"])
+    parser.add_argument('--target_model_name', type=str, default=MODELZOO["superbpe_3h_stage2"])
     parser.add_argument('--verbose', '-v', action='store_true', default=False, help='enable verbose mode')
     parser.add_argument('--seed', '-s', type=int, default=None, help='set a random seed, which can makes the result reproducible')
     parser.add_argument('--benchmark', '-b', action='store_true', default=False, help='show benchmark results.')

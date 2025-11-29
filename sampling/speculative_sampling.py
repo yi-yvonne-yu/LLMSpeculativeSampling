@@ -57,7 +57,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
         prefix_len = prefix.shape[1]
 
-        x = approx_model_cache.generate(prefix, gamma)
+        x = approx_model_cache.generate(prefix, gamma, use_base_model_only=True)
         _ = target_model_cache.generate(x, 1, use_base_model_only=True)
         
         n = prefix_len + gamma - 1
@@ -120,7 +120,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
             # It could be in the accepted draft tokens or the resampled/sampled token 't'
             new_tokens = prefix[:, prefix_len:]
             if (new_tokens == eos_token_id).any():
-                # print("end eos")
+                print("end eos")
                 # Truncate at the first EOS occurrence
                 # Find the index of the first EOS
                 eos_idx = (new_tokens[0] == eos_token_id).nonzero(as_tuple=True)[0]
