@@ -47,17 +47,16 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     num_steps = 0
     
     is_superbpe = False
-    if hasattr(target_model, "config") and hasattr(target_model.config, "base_model_name_or_path"):
-        if "superbpe" in target_model.config._name_or_path:
-            is_superbpe = True
-            # print("is superbpe")
+    if "superbpe" in target_model.config._name_or_path:
+        is_superbpe = True
+        print("is superbpe")
 
     while prefix.shape[1] < T:
         num_steps += 1
         # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
         prefix_len = prefix.shape[1]
 
-        x = approx_model_cache.generate(prefix, gamma, use_base_model_only=True)
+        x = approx_model_cache.generate(prefix, gamma, use_base_model_only=False)
         _ = target_model_cache.generate(x, 1, use_base_model_only=True)
         
         n = prefix_len + gamma - 1
@@ -88,8 +87,8 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         assert n >= prefix_len - 1, f"n {n}, prefix_len {prefix_len}"
         prefix = x[:, :n + 1]
         
+        # For Medusa, we will sync from target later, so no need to rollback approx
         approx_model_cache.rollback(n+1)
-        
         assert approx_model_cache._prob_history.shape[-2] <= n + 1, f"approx_model prob list shape {approx_model_cache._prob_history.shape}, n {n}"
         
         if n < prefix_len + gamma - 1:
@@ -112,7 +111,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         prefix = torch.cat((prefix, t), dim=1)
         
         # Calculate and print accepted tokens
-        num_accepted = n - prefix_len + 1
+        # num_accepted = n - prefix_len + 1
         # print(f"step {num_steps}: accepted {num_accepted} tokens")
 
         if eos_token_id is not None:
@@ -129,12 +128,10 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
                     prefix = prefix[:, :prefix_len + first_eos + 1] # Include EOS
                     break
         
-        approx_model_cache.rollback(n)
-        target_model_cache.rollback(n)
-        
         # Sync approx_model_cache from target_model_cache
         # This avoids recomputing KV cache for accepted tokens in approx model
-        approx_model_cache.sync_from(target_model_cache)
+        if hasattr(approx_model.config, "medusa_num_heads"):
+            approx_model_cache.sync_from(target_model_cache)
     
     if verbose:
         print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, target_sample_count {target_sample_count}, resample_count {resample_count}")

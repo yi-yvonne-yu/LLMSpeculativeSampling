@@ -1,7 +1,7 @@
 
 import torch
 import argparse
-import contexttimer
+# import contexttimer
 from colorama import Fore, Style
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -24,6 +24,7 @@ MODELZOO = {
     "llama2_70b" : "meta-llama/Llama-2-70b-hf",
     "superbpe_3h_stage2" : "yvonne90190/superbpe_1b_3h_stage2",
     "superbpe_5h_stage2" : "yvonne90190/superbpe_1b_5h_stage2",
+    "medusa_1b_7h_stage2" : "yvonne90190/medusa_1b_7h_stage2",
     "medusa_1b_5h_stage2" : "yvonne90190/medusa_1b_5h_stage2",
     "medusa_1b_3h_stage2" : "yvonne90190/medusa_1b_3h_stage2",
     "olmo2" : "allenai/OLMo-2-0425-1B-Instruct"
@@ -32,9 +33,9 @@ MODELZOO = {
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
 
-    parser.add_argument('--input', type=str, default="Any recommendations for my holidays in Abu Dhabi?")
-    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["superbpe_3h_stage2"])
-    parser.add_argument('--target_model_name', type=str, default=MODELZOO["superbpe_3h_stage2"])
+    parser.add_argument('--input', type=str, default="Any recommendations for my holidays in Taiwan?")
+    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
+    parser.add_argument('--target_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
     parser.add_argument('--verbose', '-v', action='store_true', default=False, help='enable verbose mode')
     parser.add_argument('--seed', '-s', type=int, default=None, help='set a random seed, which can makes the result reproducible')
     parser.add_argument('--benchmark', '-b', action='store_true', default=False, help='show benchmark results.')
@@ -52,29 +53,31 @@ def benchmark(fn, print_prefix, use_profiler=True, *args, **kwargs):
     TEST_TIME = 10
     profile_filename = f"./profile_logs/{print_prefix}"
     
-    with contexttimer.Timer() as t:
-        if use_profiler:
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(wait=0, warmup=1, active=2, repeat=1, skip_first=0),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_filename),
-                record_shapes=False,
-                profile_memory=False,
-                # with_stack=True
-            ) as prof:
-                for _ in range(TEST_TIME): 
-                    output = fn(*args, **kwargs)
-                    prof.step()
-        else:
+    start_time = time.perf_counter()
+    if use_profiler:
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=0, warmup=1, active=2, repeat=1, skip_first=0),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_filename),
+            record_shapes=False,
+            profile_memory=False,
+            # with_stack=True
+        ) as prof:
             for _ in range(TEST_TIME): 
                 output = fn(*args, **kwargs)
+                prof.step()
+    else:
+        for _ in range(TEST_TIME): 
+            output = fn(*args, **kwargs)
+    end_time = time.perf_counter()
+    elapsed = end_time - start_time
 
     if isinstance(output, dict):
         num_tokens = output["num_tokens"]
     else:
         num_tokens = len(output[0])
 
-    print(f"\n [benchmark] {print_prefix}, tokens/sec: {num_tokens / t.elapsed / TEST_TIME}, {t.elapsed / TEST_TIME} sec generates {num_tokens} tokens")
+    print(f"\n [benchmark] {print_prefix}, tokens/sec: {num_tokens / elapsed * TEST_TIME}, {elapsed / TEST_TIME} sec generates {num_tokens} tokens")
 
 def generate(input_text, approx_model_name, target_model_name, max_tokens=2048, gamma = 4,
              random_seed = None, verbose = False, use_benchmark = False, use_profiling = False):
