@@ -331,25 +331,17 @@ class MedusaModelABC(nn.Module):
             all_scores.append(base_logits)
             
             # Subsequent draft tokens come from Medusa heads
-            medusa_logits_list = []
-            for i in range(self.medusa):
-                # head[i] predicts t+i+2 (relative to curr_hidden's t)
-                medusa_logits = self.medusa_head[i](curr_hidden) # (batch, 1, vocab)
-                medusa_logits_list.append(medusa_logits)
-            
-            # Now sample from these logits
             # We need gamma tokens total. We already have 1 (token_0).
             # So we need gamma-1 more.
             
-            for i in range(gamma - 1):
-                if i < len(medusa_logits_list):
-                    logits = medusa_logits_list[i]
-                    probs = norm_logits(logits[:, -1, :], temperature, top_k, top_p)
-                    token = sample(probs)
-                    draft_tokens.append(token)
-                    draft_probs.append(probs)
-                else:
-                    break
+            for i in range(self.medusa):
+                # head[i] predicts t+i+2 (relative to curr_hidden's t)
+                medusa_logits = self.medusa_head[i](curr_hidden) # (batch, 1, vocab)
+                
+                probs = norm_logits(medusa_logits[:, -1, :], temperature, top_k, top_p)
+                token = sample(probs)
+                draft_tokens.append(token)
+                draft_probs.append(probs)
             
             draft_input_ids = torch.cat(draft_tokens, dim=1) # (batch, gamma)
             

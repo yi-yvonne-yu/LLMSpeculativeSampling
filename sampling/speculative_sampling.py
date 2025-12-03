@@ -87,7 +87,6 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         assert n >= prefix_len - 1, f"n {n}, prefix_len {prefix_len}"
         prefix = x[:, :n + 1]
         
-        # For Medusa, we will sync from target later, so no need to rollback approx
         approx_model_cache.rollback(n+1)
         assert approx_model_cache._prob_history.shape[-2] <= n + 1, f"approx_model prob list shape {approx_model_cache._prob_history.shape}, n {n}"
         
