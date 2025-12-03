@@ -276,6 +276,309 @@ class MedusaModelABC(nn.Module):
             attentions=outputs.attentions,
         )
 
+    @torch.no_grad()
+    def medusa_generate(
+        self,
+        input_ids: torch.LongTensor,
+        max_len: int = 512,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        gamma: int = 4,
+        eos_token_id: int = None,
+    ):
+        """
+        Optimized generation loop for Medusa models.
+        Fuses drafting and verification to ensure 1 backbone pass per step.
+        """
+        from sampling.utils import norm_logits, sample
+        # print(f"Max_len = {max_len}")
+        # 1. Prefill
+        # Run the model on the input_ids to get the initial hidden states and KV cache
+        outputs = self.base_model.model(
+            input_ids=input_ids,
+            use_cache=True,
+            return_dict=True,
+        )
+        past_key_values = outputs.past_key_values
+        hidden_states = outputs[0] # (batch, seq_len, hidden_size)
+        
+        # The last hidden state is used to draft the next tokens
+        last_hidden_state = hidden_states[:, -1:, :]
+        
+        cur_len = input_ids.shape[1]
+        final_input_ids = input_ids.clone()
+        all_scores = []
+        
+        step = 0
+        step_count = 0
+        while final_input_ids.shape[1] < max_len:
+            step_count += 1
+            # 2. Draft
+            # Use medusa heads to generate gamma draft tokens
+            # last_hidden_state: (batch, 1, hidden_size)
+            
+            draft_tokens = []
+            draft_probs = []
+            
+            curr_hidden = last_hidden_state
+            
+            # First draft token comes from the Base Model (lm_head)
+            base_logits = self.base_model.lm_head(curr_hidden) # (batch, 1, vocab)
+            base_probs = norm_logits(base_logits[:, -1, :], temperature, top_k, top_p)
+            token_0 = sample(base_probs)
+            draft_tokens.append(token_0)
+            all_scores.append(base_logits)
+            
+            # Subsequent draft tokens come from Medusa heads
+            medusa_logits_list = []
+            for i in range(self.medusa):
+                # head[i] predicts t+i+2 (relative to curr_hidden's t)
+                medusa_logits = self.medusa_head[i](curr_hidden) # (batch, 1, vocab)
+                medusa_logits_list.append(medusa_logits)
+            
+            # Now sample from these logits
+            # We need gamma tokens total. We already have 1 (token_0).
+            # So we need gamma-1 more.
+            
+            for i in range(gamma - 1):
+                if i < len(medusa_logits_list):
+                    logits = medusa_logits_list[i]
+                    probs = norm_logits(logits[:, -1, :], temperature, top_k, top_p)
+                    token = sample(probs)
+                    draft_tokens.append(token)
+                    draft_probs.append(probs)
+                else:
+                    break
+            
+            draft_input_ids = torch.cat(draft_tokens, dim=1) # (batch, gamma)
+            
+            # 3. Verify
+            # Run base model on the draft tokens
+            target_outputs = self.base_model.model(
+                input_ids=draft_input_ids,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            
+            target_hidden_states = target_outputs[0] # (batch, gamma, hidden_size)
+            target_logits = self.base_model.lm_head(target_hidden_states) # (batch, gamma, vocab)
+            new_past_key_values = target_outputs.past_key_values
+            
+            # Rejection Sampling
+            # We verify draft_tokens[1:] against target_logits
+            # draft_tokens[0] is accepted.
+            # target_logits[0] verifies draft_tokens[1]
+            # target_logits[1] verifies draft_tokens[2]
+            
+            accepted_count = 1 # token_0 is always accepted
+            
+            # Check draft_tokens[1:]
+            # There are len(draft_tokens)-1 candidates to verify
+            
+            for i in range(len(draft_tokens) - 1):
+                # We are verifying draft_tokens[i+1]
+                # Using target_logits[i]
+                
+                token_id = draft_tokens[i+1].item()
+                target_probs = norm_logits(target_logits[:, i, :], temperature, top_k, top_p)
+                draft_prob = draft_probs[i][0, token_id].item()
+                target_prob = target_probs[0, token_id].item()
+                
+                if torch.rand(1).item() < min(1.0, target_prob / draft_prob):
+                    accepted_count += 1
+                else:
+                    # Rejected draft_tokens[i+1]
+                    # Resample from target_probs (which corresponds to position of draft_tokens[i+1])
+                    resampled_token = sample(target_probs)
+                    
+                    # Correction
+                    # We keep draft_tokens[:accepted_count] and append resampled_token
+                    # accepted_count includes token_0 and any accepted medusa tokens
+                    
+                    final_input_ids = torch.cat([final_input_ids, draft_input_ids[:, :accepted_count], resampled_token], dim=1)
+                    
+                    # Collect scores
+                    # We accepted accepted_count tokens (including token_0).
+                    # token_0 scores are already in all_scores.
+                    # We need scores for the accepted medusa tokens + resampled token.
+                    # Medusa tokens: draft_tokens[1:accepted_count] -> target_logits[:, 0:accepted_count-1]
+                    # Resampled token: target_logits[:, accepted_count-1] (which is target_logits[:, i])
+                    # So we want target_logits[:, 0:accepted_count]
+                    
+                    all_scores.append(target_logits[:, :accepted_count, :])
+                    
+                    # Update KV cache
+                    # We need to keep KV for accepted_count tokens.
+                    # new_past_key_values has KV for all draft tokens.
+                    # We slice it to accepted_count.
+                    
+                    # Helper to slice KV cache
+                    def slice_kv(past, length):
+                        if past is None: return None
+                        
+                        # Handle DynamicCache
+                        if hasattr(past, 'key_cache'): 
+                            # Modify in-place
+                            for i in range(len(past.key_cache)):
+                                past.key_cache[i] = past.key_cache[i][..., :length, :]
+                                past.value_cache[i] = past.value_cache[i][..., :length, :]
+                            
+                            if hasattr(past, '_seen_tokens'):
+                                past._seen_tokens = length
+                            elif hasattr(past, 'seen_tokens'):
+                                past.seen_tokens = length
+                            return past
+                        
+                        # Handle Tuple
+                        new_past = []
+                        for layer in past:
+                            k, v = layer
+                            new_k = k[..., :length, :]
+                            new_v = v[..., :length, :]
+                            new_past.append((new_k, new_v))
+                        return tuple(new_past)
+                    
+                    # The total length in new_past_key_values is cur_len + gamma
+                    # We want to keep cur_len + accepted_count
+                    keep_len = cur_len + accepted_count
+                    past_key_values = slice_kv(new_past_key_values, keep_len)
+                    
+                    # Run forward on correction token
+                    correction_outputs = self.base_model.model(
+                        input_ids=resampled_token,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    past_key_values = correction_outputs.past_key_values
+                    last_hidden_state = correction_outputs[0] # (batch, 1, hidden_size)
+                    
+                    step += (accepted_count + 1)
+                    cur_len += (accepted_count + 1)
+                    break
+            
+            else:
+                # All accepted
+                accepted_count = len(draft_tokens)
+                final_input_ids = torch.cat([final_input_ids, draft_input_ids], dim=1)
+                
+                # Sample one more token
+                # target_logits[accepted_count - 1] predicts the token AFTER the last draft token
+                last_logits = target_logits[:, accepted_count - 1, :]
+                last_probs = norm_logits(last_logits, temperature, top_k, top_p)
+                extra_token = sample(last_probs)
+                
+                final_input_ids = torch.cat([final_input_ids, extra_token], dim=1)
+                
+                # Collect scores
+                # We accepted all drafts (excluding token_0, that's accepted_count-1 tokens) + 1 extra
+                # Total added from target_logits: accepted_count
+                # target_logits has shape (batch, gamma, vocab).
+                # We want target_logits[:, :accepted_count, :]
+                all_scores.append(target_logits[:, :accepted_count, :])
+                
+                # Update KV cache
+                past_key_values = new_past_key_values
+                
+                extra_outputs = self.base_model.model(
+                    input_ids=extra_token,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                past_key_values = extra_outputs.past_key_values
+                last_hidden_state = extra_outputs[0]
+                
+                step += (accepted_count + 1)
+                cur_len += (accepted_count + 1)
+
+            if eos_token_id is not None and (final_input_ids[:, input_ids.shape[1]:] == eos_token_id).any():
+                # print("eos: ", final_input_ids[:, input_ids.shape[1]:])
+                # Truncate at first EOS
+                new_tokens = final_input_ids[:, input_ids.shape[1]:]
+                
+                eos_idx = (new_tokens[0] == eos_token_id).nonzero(as_tuple=True)[0]
+                if len(eos_idx) > 0:
+                    first_eos = eos_idx[0].item()
+                    final_input_ids = final_input_ids[:, :input_ids.shape[1] + first_eos + 1]
+                break
+            
+            # if final_input_ids.shape[1] >= max_len:
+            #     print(">= max_len")
+                
+        # Concatenate scores
+        if all_scores:
+            final_scores = torch.cat(all_scores, dim=1)
+        else:
+            final_scores = None
+            
+        # Truncate to max_len
+        if final_input_ids.shape[1] > max_len:
+            final_input_ids = final_input_ids[:, :max_len]
+            
+        if final_scores is not None:
+            num_new_tokens = final_input_ids.shape[1] - input_ids.shape[1]
+            if final_scores.shape[1] > num_new_tokens:
+                final_scores = final_scores[:, :num_new_tokens, :]
+        
+        # print(f"before retrun: {final_input_ids[:, input_ids.shape[1]:]}")
+        return {
+            "sequences": final_input_ids,
+            "scores": final_scores,
+            "num_tokens": final_input_ids.shape[1] - input_ids.shape[1],
+            "num_step": step_count
+        }
+
+    @torch.no_grad()
+    def autoregressive_generate(
+        self,
+        input_ids: torch.LongTensor,
+        max_len: int = 512,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        eos_token_id: int = None,
+    ):
+        # print("in medusa's autoregressive generate")
+        from sampling.utils import norm_logits, sample
+        
+        x = input_ids
+        seq_len = x.shape[1]
+        n = 0
+        past_key_values = None
+        scores = []
+        
+        while x.shape[1] < max_len:
+            n += 1
+            if past_key_values:
+                last_ids = x[:, -1]
+                if last_ids.dim() == 1:
+                    last_ids = torch.unsqueeze(last_ids, 0)
+                outputs = self.base_model.model(last_ids, past_key_values=past_key_values, use_cache=True)
+            else:
+                outputs = self.base_model.model(x, use_cache=True)
+            
+            hidden_states = outputs[0]
+            logits = self.base_model.lm_head(hidden_states)
+            
+            last_p = norm_logits(logits[::, -1, :], temperature, top_k, top_p)
+            scores.append(logits[::, -1, :])
+            past_key_values = outputs.past_key_values
+            idx_next = sample(last_p)
+            x = torch.cat((x, idx_next), dim=1)
+            
+            if eos_token_id is not None and idx_next[0] == eos_token_id:
+                break
+                
+        return {
+            "sequences": x,
+            "scores": torch.stack(scores, dim=1) if scores else None,
+            "num_tokens": x.shape[-1] - seq_len,
+            "num_step": n,
+        }
+
 class MedusaModelOlmo(MedusaModelABC, Olmo2ForCausalLM):
     config_class = MedusaConfig
     pass

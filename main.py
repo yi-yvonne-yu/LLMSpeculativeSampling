@@ -33,9 +33,9 @@ MODELZOO = {
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
 
-    parser.add_argument('--input', type=str, default="Any recommendations for my holidays in Taiwan?")
-    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
-    parser.add_argument('--target_model_name', type=str, default=MODELZOO["superbpe_5h_stage2"])
+    parser.add_argument('--input', type=str, default="Where can I go in COlumbus?")
+    parser.add_argument('--approx_model_name', type=str, default=MODELZOO["medusa_1b_7h_stage2"])
+    parser.add_argument('--target_model_name', type=str, default=MODELZOO["medusa_1b_7h_stage2"])
     parser.add_argument('--verbose', '-v', action='store_true', default=False, help='enable verbose mode')
     parser.add_argument('--seed', '-s', type=int, default=None, help='set a random seed, which can makes the result reproducible')
     parser.add_argument('--benchmark', '-b', action='store_true', default=False, help='show benchmark results.')
@@ -125,7 +125,11 @@ def generate(input_text, approx_model_name, target_model_name, max_tokens=2048, 
 
     torch.manual_seed(123)
     start_time = time.time()
-    output = autoregressive_sampling(input_ids, small_model, max_tokens, top_k = top_k, top_p=top_p, eos_token_id=tokenizer.eos_token_id)
+    if hasattr(small_model, "autoregressive_generate"):
+        print("Using model.autoregressive_generate")
+        output = small_model.autoregressive_generate(input_ids, max_len=max_tokens, top_k=top_k, top_p=top_p, eos_token_id=tokenizer.eos_token_id)
+    else:
+        output = autoregressive_sampling(input_ids, small_model, max_tokens, top_k = top_k, top_p=top_p, eos_token_id=tokenizer.eos_token_id)
     num_tokens = output["num_tokens"]
     sequences = output["sequences"]
     total_time = time.time() - start_time
@@ -149,19 +153,35 @@ def generate(input_text, approx_model_name, target_model_name, max_tokens=2048, 
     # generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     # color_print(f"deepmind's speculative_sampling: {generated_text}")   
 
-    torch.manual_seed(123)
-    start_time = time.time()
-    output = speculative_sampling(input_ids, small_model, large_model, max_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose, eos_token_id=tokenizer.eos_token_id)
-    num_tokens = output["num_tokens"]
-    sequences = output["sequences"]
-    total_time = time.time() - start_time
-    print(f"time = {total_time}")
-    print(f"num_tokens = {output['num_tokens']}")
-    print(f"scores.shape = {output['scores'].shape}")
-    print(f"num_step = {output['num_step']}")
-    print(f"token/sec = {num_tokens/total_time}")
-    generated_text = tokenizer.decode(sequences[0], skip_special_tokens=True)
-    color_print(f"google's speculative_sampling: {generated_text}")
+    if hasattr(small_model, "medusa_generate"):
+        print("Using optimized medusa_generate")
+        torch.manual_seed(123)
+        start_time = time.time()
+        output = small_model.medusa_generate(input_ids, max_len=max_tokens, gamma=gamma, top_k=top_k, top_p=top_p, eos_token_id=tokenizer.eos_token_id)
+        sequences = output["sequences"]
+        total_time = time.time() - start_time
+        num_tokens = sequences.shape[1] - input_ids.shape[1]
+        print(f"time = {total_time}")
+        print(f"num_tokens = {output['num_tokens']}")
+        print(f"scores.shape = {output['scores'].shape}")
+        print(f"num_step = {output['num_step']}")
+        print(f"token/sec = {num_tokens/total_time}")
+        generated_text = tokenizer.decode(sequences[0], skip_special_tokens=True)
+        color_print(f"medusa optimized sampling: {generated_text}")
+    else:
+        torch.manual_seed(123)
+        start_time = time.time()
+        output = speculative_sampling(input_ids, small_model, large_model, max_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose, eos_token_id=tokenizer.eos_token_id)
+        num_tokens = output["num_tokens"]
+        sequences = output["sequences"]
+        total_time = time.time() - start_time
+        print(f"time = {total_time}")
+        print(f"num_tokens = {output['num_tokens']}")
+        print(f"scores.shape = {output['scores'].shape}")
+        print(f"num_step = {output['num_step']}")
+        print(f"token/sec = {num_tokens/total_time}")
+        generated_text = tokenizer.decode(sequences[0], skip_special_tokens=True)
+        color_print(f"google's speculative_sampling: {generated_text}")
     
     if use_benchmark:
         benchmark(speculative_sampling, "SP", use_profiling,
